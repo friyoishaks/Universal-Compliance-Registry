@@ -6,6 +6,8 @@
 (define-constant ERR_EXPIRED (err u104))
 (define-constant ERR_NOT_REGULATOR (err u105))
 (define-constant ERR_INVALID_STATUS (err u106))
+(define-constant ERR_TRANSFER_PENDING (err u107))
+(define-constant ERR_NO_TRANSFER (err u108))
 
 (define-data-var contract-owner principal CONTRACT_OWNER)
 (define-data-var document-id-nonce uint u0)
@@ -53,6 +55,16 @@
     registration-number: (string-ascii 50),
     registered-at: uint,
     is-active: bool
+  }
+)
+
+(define-map document-transfer-requests
+  { document-id: uint }
+  {
+    from-company: principal,
+    to-company: principal,
+    requested-at: uint,
+    status: (string-ascii 20)
   }
 )
 
@@ -263,4 +275,78 @@
     document (is-eq (get document-hash document) provided-hash)
     false
   )
+)
+
+(define-public (request-document-transfer (document-id uint) (to-company principal))
+  (let
+    (
+      (document (unwrap! (map-get? compliance-documents { document-id: document-id }) ERR_NOT_FOUND))
+      (to-profile (unwrap! (map-get? company-profiles { company: to-company }) ERR_NOT_FOUND))
+      (existing-transfer (map-get? document-transfer-requests { document-id: document-id }))
+    )
+    (asserts! (is-eq (get company document) tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (is-none existing-transfer) ERR_TRANSFER_PENDING)
+    (asserts! (get is-active to-profile) ERR_UNAUTHORIZED)
+    (ok (map-set document-transfer-requests
+      { document-id: document-id }
+      {
+        from-company: tx-sender,
+        to-company: to-company,
+        requested-at: stacks-block-height,
+        status: "pending"
+      }
+    ))
+  )
+)
+
+(define-public (accept-document-transfer (document-id uint))
+  (let
+    (
+      (transfer (unwrap! (map-get? document-transfer-requests { document-id: document-id }) ERR_NO_TRANSFER))
+      (document (unwrap! (map-get? compliance-documents { document-id: document-id }) ERR_NOT_FOUND))
+    )
+    (asserts! (is-eq (get to-company transfer) tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status transfer) "pending") ERR_INVALID_STATUS)
+    (map-set compliance-documents
+      { document-id: document-id }
+      (merge document { company: tx-sender })
+    )
+    (map-set document-transfer-requests
+      { document-id: document-id }
+      (merge transfer { status: "completed" })
+    )
+    (update-company-compliance-status (get from-company transfer) (get industry document))
+    (update-company-compliance-status tx-sender (get industry document))
+    (ok true)
+  )
+)
+
+(define-public (reject-document-transfer (document-id uint))
+  (let
+    (
+      (transfer (unwrap! (map-get? document-transfer-requests { document-id: document-id }) ERR_NO_TRANSFER))
+    )
+    (asserts! (is-eq (get to-company transfer) tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status transfer) "pending") ERR_INVALID_STATUS)
+    (map-set document-transfer-requests
+      { document-id: document-id }
+      (merge transfer { status: "rejected" })
+    )
+    (ok true)
+  )
+)
+
+(define-public (cancel-document-transfer (document-id uint))
+  (let
+    (
+      (transfer (unwrap! (map-get? document-transfer-requests { document-id: document-id }) ERR_NO_TRANSFER))
+    )
+    (asserts! (is-eq (get from-company transfer) tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status transfer) "pending") ERR_INVALID_STATUS)
+    (ok (map-delete document-transfer-requests { document-id: document-id }))
+  )
+)
+
+(define-read-only (get-transfer-request (document-id uint))
+  (map-get? document-transfer-requests { document-id: document-id })
 )
